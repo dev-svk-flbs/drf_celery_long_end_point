@@ -1,9 +1,10 @@
 from rest_framework import serializers
+
+from apps.endpoints.models import ABTest, PredictModelProcess
 from apps.endpoints.models import Endpoint
 from apps.endpoints.models import MLAlgorithm
 from apps.endpoints.models import MLAlgorithmStatus
 from apps.endpoints.models import MLRequest
-from apps.endpoints.models import ABTest
 
 
 class EndpointSerializer(serializers.ModelSerializer):
@@ -14,7 +15,6 @@ class EndpointSerializer(serializers.ModelSerializer):
 
 
 class MLAlgorithmSerializer(serializers.ModelSerializer):
-
     current_status = serializers.SerializerMethodField(read_only=True)
 
     def get_current_status(self, mlalgorithm):
@@ -26,13 +26,15 @@ class MLAlgorithmSerializer(serializers.ModelSerializer):
                             "version", "owner", "created_at",
                             "parent_endpoint", "current_status")
         fields = read_only_fields
-        
+
+
 class MLAlgorithmStatusSerializer(serializers.ModelSerializer):
     class Meta:
         model = MLAlgorithmStatus
         read_only_fields = ("id", "active")
         fields = ("id", "active", "status", "created_by", "created_at",
-                            "parent_mlalgorithm")
+                  "parent_mlalgorithm")
+
 
 class MLRequestSerializer(serializers.ModelSerializer):
     class Meta:
@@ -45,7 +47,7 @@ class MLRequestSerializer(serializers.ModelSerializer):
             "created_at",
             "parent_mlalgorithm",
         )
-        fields =  (
+        fields = (
             "id",
             "input_data",
             "full_response",
@@ -54,6 +56,7 @@ class MLRequestSerializer(serializers.ModelSerializer):
             "created_at",
             "parent_mlalgorithm",
         )
+
 
 class ABTestSerializer(serializers.ModelSerializer):
     class Meta:
@@ -73,4 +76,13 @@ class ABTestSerializer(serializers.ModelSerializer):
             "summary",
             "parent_mlalgorithm_1",
             "parent_mlalgorithm_2",
-            )
+        )
+
+
+class PredictModelSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PredictModelProcess
+        fields = "__all__"
+
+class RequestBodySerializer(serializers.Serializer):
+    predict = serializers.JSONField()

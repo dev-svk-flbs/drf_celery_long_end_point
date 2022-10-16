@@ -1,28 +1,30 @@
-from rest_framework import viewsets
-from rest_framework import mixins
-
-from apps.endpoints.models import Endpoint
-from apps.endpoints.serializers import EndpointSerializer
-
-from apps.endpoints.models import MLAlgorithm
-from apps.endpoints.serializers import MLAlgorithmSerializer
-
-from apps.endpoints.models import MLAlgorithmStatus
-from apps.endpoints.serializers import MLAlgorithmStatusSerializer
-
-from apps.endpoints.models import MLRequest
-from apps.endpoints.serializers import MLRequestSerializer
+import json
+import uuid
 
 from django.db import transaction
-from apps.endpoints.models import ABTest
-from apps.endpoints.serializers import ABTestSerializer
-
-import json
+from django.urls import reverse
 from numpy.random import rand
+from rest_framework import mixins
 from rest_framework import views, status
+from rest_framework import viewsets
+from rest_framework.exceptions import APIException
+from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
-from apps.ml.registry import MLRegistry
+
+from apps.endpoints.constants import StatusChoices
+from apps.endpoints.models import ABTest
+from apps.endpoints.models import Endpoint, PredictModelProcess
+from apps.endpoints.models import MLAlgorithm
+from apps.endpoints.models import MLAlgorithmStatus
+from apps.endpoints.models import MLRequest
+from apps.endpoints.serializers import ABTestSerializer, PredictModelSerializer
+from apps.endpoints.serializers import EndpointSerializer, RequestBodySerializer
+from apps.endpoints.serializers import MLAlgorithmSerializer
+from apps.endpoints.serializers import MLAlgorithmStatusSerializer
+from apps.endpoints.serializers import MLRequestSerializer
+from apps.endpoints.tasks import predict_model
 from server.wsgi import registry
+
 
 class EndpointViewSet(
     mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet
@@ -39,12 +41,13 @@ class MLAlgorithmViewSet(
 
 
 def deactivate_other_statuses(instance):
-    old_statuses = MLAlgorithmStatus.objects.filter(parent_mlalgorithm = instance.parent_mlalgorithm,
-                                                        created_at__lt=instance.created_at,
-                                                        active=True)
+    old_statuses = MLAlgorithmStatus.objects.filter(parent_mlalgorithm=instance.parent_mlalgorithm,
+                                                    created_at__lt=instance.created_at,
+                                                    active=True)
     for i in range(len(old_statuses)):
         old_statuses[i].active = False
     MLAlgorithmStatus.objects.bulk_update(old_statuses, ["active"])
+
 
 class MLAlgorithmStatusViewSet(
     mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet,
@@ -52,6 +55,7 @@ class MLAlgorithmStatusViewSet(
 ):
     serializer_class = MLAlgorithmStatusSerializer
     queryset = MLAlgorithmStatus.objects.all()
+
     def perform_create(self, serializer):
         try:
             with transaction.atomic():
@@ -64,6 +68,7 @@ class MLAlgorithmStatusViewSet(
         except Exception as e:
             raise APIException(str(e))
 
+
 class MLRequestViewSet(
     mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet,
     mixins.UpdateModelMixin
@@ -71,16 +76,18 @@ class MLRequestViewSet(
     serializer_class = MLRequestSerializer
     queryset = MLRequest.objects.all()
 
+
 class PredictView(views.APIView):
     def post(self, request, endpoint_name, format=None):
 
         algorithm_status = self.request.query_params.get("status", "production")
         algorithm_version = self.request.query_params.get("version")
 
-        algs = MLAlgorithm.objects.filter(parent_endpoint__name = endpoint_name, status__status = algorithm_status, status__active=True)
+        algs = MLAlgorithm.objects.filter(parent_endpoint__name=endpoint_name, status__status=algorithm_status,
+                                          status__active=True)
 
         if algorithm_version is not None:
-            algs = algs.filter(version = algorithm_version)
+            algs = algs.filter(version=algorithm_version)
 
         if len(algs) == 0:
             return Response(
@@ -89,7 +96,8 @@ class PredictView(views.APIView):
             )
         if len(algs) != 1 and algorithm_status != "ab_testing":
             return Response(
-                {"status": "Error", "message": "ML algorithm selection is ambiguous. Please specify algorithm version."},
+                {"status": "Error",
+                 "message": "ML algorithm selection is ambiguous. Please specify algorithm version."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         alg_index = 0
@@ -98,7 +106,6 @@ class PredictView(views.APIView):
 
         algorithm_object = registry.endpoints[algs[alg_index].id]
         prediction = algorithm_object.compute_prediction(request.data)
-
 
         label = prediction["label"] if "label" in prediction else "error"
         ml_request = MLRequest(
@@ -115,7 +122,6 @@ class PredictView(views.APIView):
         return Response(prediction)
 
 
-
 class ABTestViewSet(
     mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet,
     mixins.CreateModelMixin, mixins.UpdateModelMixin
@@ -129,25 +135,27 @@ class ABTestViewSet(
                 instance = serializer.save()
                 # update status for first algorithm
 
-                status_1 = MLAlgorithmStatus(status = "ab_testing",
-                                created_by=instance.created_by,
-                                parent_mlalgorithm = instance.parent_mlalgorithm_1,
-                                active=True)
+                status_1 = MLAlgorithmStatus(status="ab_testing",
+                                             created_by=instance.created_by,
+                                             parent_mlalgorithm=instance.parent_mlalgorithm_1,
+                                             active=True)
                 status_1.save()
                 deactivate_other_statuses(status_1)
                 # update status for second algorithm
-                status_2 = MLAlgorithmStatus(status = "ab_testing",
-                                created_by=instance.created_by,
-                                parent_mlalgorithm = instance.parent_mlalgorithm_2,
-                                active=True)
+                status_2 = MLAlgorithmStatus(status="ab_testing",
+                                             created_by=instance.created_by,
+                                             parent_mlalgorithm=instance.parent_mlalgorithm_2,
+                                             active=True)
                 status_2.save()
                 deactivate_other_statuses(status_2)
 
         except Exception as e:
             raise APIException(str(e))
 
+
 from django.db.models import F
 import datetime
+
 
 class StopABTestView(views.APIView):
     def post(self, request, ab_test_id, format=None):
@@ -160,14 +168,22 @@ class StopABTestView(views.APIView):
 
             date_now = datetime.datetime.now()
             # alg #1 accuracy
-            all_responses_1 = MLRequest.objects.filter(parent_mlalgorithm=ab_test.parent_mlalgorithm_1, created_at__gt = ab_test.created_at, created_at__lt = date_now).count()
-            correct_responses_1 = MLRequest.objects.filter(parent_mlalgorithm=ab_test.parent_mlalgorithm_1, created_at__gt = ab_test.created_at, created_at__lt = date_now, response=F('feedback')).count()
+            all_responses_1 = MLRequest.objects.filter(parent_mlalgorithm=ab_test.parent_mlalgorithm_1,
+                                                       created_at__gt=ab_test.created_at,
+                                                       created_at__lt=date_now).count()
+            correct_responses_1 = MLRequest.objects.filter(parent_mlalgorithm=ab_test.parent_mlalgorithm_1,
+                                                           created_at__gt=ab_test.created_at, created_at__lt=date_now,
+                                                           response=F('feedback')).count()
             accuracy_1 = correct_responses_1 / float(all_responses_1)
             print(all_responses_1, correct_responses_1, accuracy_1)
 
             # alg #2 accuracy
-            all_responses_2 = MLRequest.objects.filter(parent_mlalgorithm=ab_test.parent_mlalgorithm_2, created_at__gt = ab_test.created_at, created_at__lt = date_now).count()
-            correct_responses_2 = MLRequest.objects.filter(parent_mlalgorithm=ab_test.parent_mlalgorithm_2, created_at__gt = ab_test.created_at, created_at__lt = date_now, response=F('feedback')).count()
+            all_responses_2 = MLRequest.objects.filter(parent_mlalgorithm=ab_test.parent_mlalgorithm_2,
+                                                       created_at__gt=ab_test.created_at,
+                                                       created_at__lt=date_now).count()
+            correct_responses_2 = MLRequest.objects.filter(parent_mlalgorithm=ab_test.parent_mlalgorithm_2,
+                                                           created_at__gt=ab_test.created_at, created_at__lt=date_now,
+                                                           response=F('feedback')).count()
             accuracy_2 = correct_responses_2 / float(all_responses_2)
             print(all_responses_2, correct_responses_2, accuracy_2)
 
@@ -177,20 +193,19 @@ class StopABTestView(views.APIView):
             if accuracy_1 < accuracy_2:
                 alg_id_1, alg_id_2 = alg_id_2, alg_id_1
 
-            status_1 = MLAlgorithmStatus(status = "production",
-                            created_by=ab_test.created_by,
-                            parent_mlalgorithm = alg_id_1,
-                            active=True)
+            status_1 = MLAlgorithmStatus(status="production",
+                                         created_by=ab_test.created_by,
+                                         parent_mlalgorithm=alg_id_1,
+                                         active=True)
             status_1.save()
             deactivate_other_statuses(status_1)
             # update status for second algorithm
-            status_2 = MLAlgorithmStatus(status = "testing",
-                            created_by=ab_test.created_by,
-                            parent_mlalgorithm = alg_id_2,
-                            active=True)
+            status_2 = MLAlgorithmStatus(status="testing",
+                                         created_by=ab_test.created_by,
+                                         parent_mlalgorithm=alg_id_2,
+                                         active=True)
             status_2.save()
             deactivate_other_statuses(status_2)
-
 
             summary = "Algorithm #1 accuracy: {}, Algorithm #2 accuracy: {}".format(accuracy_1, accuracy_2)
             ab_test.ended_at = date_now
@@ -200,5 +215,67 @@ class StopABTestView(views.APIView):
         except Exception as e:
             return Response({"status": "Error", "message": str(e)},
                             status=status.HTTP_400_BAD_REQUEST
-            )
+                            )
         return Response({"message": "AB Test finished.", "summary": summary})
+
+
+class PredictViewSet(mixins.CreateModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    serializer_class = RequestBodySerializer
+    queryset = PredictModelProcess.objects.all()
+    lookup_field = "pk"
+    lookup_url_kwarg = "pk"
+
+    def get_serializer_class(self):
+        serializer_class = self.serializer_class
+        if self.action == "retrieve":
+            serializer_class = PredictModelSerializer
+        return serializer_class
+
+    def get_queryset(self):
+        qs = super(PredictViewSet, self).get_queryset()
+        print(qs)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        predict_progress = PredictModelProcess.objects.create(status=StatusChoices.IN_PROCESS)
+        predict_progress.save()
+        sleep = request.data.get("predict").get("sleep",60*5)
+        predict_model.delay(str(sleep),str(predict_progress.pk))
+        headers = self.get_success_headers(serializer.data)
+        data = serializer.data
+        data["callback_url"] =  request.build_absolute_uri(reverse("ml-detail",args=(predict_progress.pk,)))
+        return Response(data, status=status.HTTP_201_CREATED, headers=headers)
+    def get_object(self):
+        """
+        Returns the object the view is displaying.
+
+        You may want to override this if you need to provide non-standard
+        queryset lookups.  Eg if objects are referenced using multiple
+        keyword arguments in the url conf.
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # Perform the lookup filtering.
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+
+        assert lookup_url_kwarg in self.kwargs, (
+            'Expected view %s to be called with a URL keyword argument '
+            'named "%s". Fix your URL conf, or set the `.lookup_field` '
+            'attribute on the view correctly.' %
+            (self.__class__.__name__, lookup_url_kwarg)
+        )
+
+        filter_kwargs = {self.lookup_field: self.kwargs[lookup_url_kwarg]}
+        print(filter_kwargs)
+        obj = get_object_or_404(queryset, **filter_kwargs)
+
+        # May raise a permission denied
+        self.check_object_permissions(self.request, obj)
+
+        return obj
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)

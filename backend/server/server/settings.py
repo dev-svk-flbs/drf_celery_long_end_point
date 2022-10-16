@@ -25,7 +25,7 @@ SECRET_KEY = '^lw0)9982b8nt^^-t34967jnl(n7iojl!q+!5xojw9mr6u0h9f'
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['0.0.0.0']
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework', # add django rest framework
+    'drf_yasg',
     # apps
     'apps.endpoints',
     'apps.ml'
@@ -123,3 +124,16 @@ USE_TZ = True
 
 STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 STATIC_URL = '/static/'
+
+# Celery Configuration Options
+
+BROKER_URL = os.environ.get('BROKER_URL', 'redis://localhost:6379')
+CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379')
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60 * 60
+CELERY_WORKER_CONCURRENCY = 10
+CELERY_BROKER_URL = BROKER_URL
+CELERY_ACCEPT_CONTENT = ['application/json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
